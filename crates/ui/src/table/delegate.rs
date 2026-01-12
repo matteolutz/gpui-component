@@ -23,7 +23,7 @@ pub trait TableDelegate: Sized + 'static {
     /// Returns the table column at the given index.
     ///
     /// This only call on Table prepare or refresh.
-    fn column(&self, col_ix: usize, cx: &App) -> &Column;
+    fn column(&self, col_ix: usize, cx: &App) -> Column;
 
     /// Perform sort on the column at the given index.
     fn perform_sort(
@@ -131,9 +131,9 @@ pub trait TableDelegate: Sized + 'static {
 
     /// Return true to enable load more data when scrolling to the bottom.
     ///
-    /// Default: true
-    fn is_eof(&self, cx: &App) -> bool {
-        true
+    /// Default: false
+    fn has_more(&self, cx: &App) -> bool {
+        false
     }
 
     /// Returns a threshold value (n rows), of course, when scrolling to the bottom,

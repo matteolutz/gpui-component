@@ -1,7 +1,7 @@
 use std::{ops::Range, rc::Rc, time::Duration};
 
 use crate::{
-    ActiveTheme, Icon, IconName, StyleSized as _, StyledExt, VirtualListScrollHandle,
+    ActiveTheme, ElementExt, Icon, IconName, StyleSized as _, StyledExt, VirtualListScrollHandle,
     actions::{Cancel, SelectDown, SelectUp},
     h_flex,
     menu::{ContextMenuExt, PopupMenu},
@@ -12,7 +12,7 @@ use gpui::{
     AppContext, Axis, Bounds, ClickEvent, Context, Div, DragMoveEvent, EventEmitter, FocusHandle,
     Focusable, InteractiveElement, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent,
     ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled, Task, UniformListScrollHandle, Window, canvas, div,
+    StatefulInteractiveElement as _, Styled, Task, UniformListScrollHandle, Window, div,
     prelude::FluentBuilder, px, uniform_list,
 };
 
@@ -42,6 +42,8 @@ pub enum TableEvent {
     /// The first `usize` is the original index of the column,
     /// and the second `usize` is the new index of the column.
     MoveColumn(usize, usize),
+    /// The row has been right clicked.
+    RightClickedRow(Option<usize>),
 }
 
 /// The visible range of the rows and columns.
@@ -241,7 +243,13 @@ where
             );
         }
         cx.emit(TableEvent::SelectRow(row_ix));
+        cx.emit(TableEvent::RightClickedRow(None));
         cx.notify();
+    }
+
+    /// Returns the row that has been right clicked.
+    pub fn right_clicked_row(&self) -> Option<usize> {
+        self.right_clicked_row
     }
 
     /// Returns the selected column index.
@@ -282,7 +290,7 @@ where
                 ColGroup {
                     width: column.width,
                     bounds: Bounds::default(),
-                    column: column.clone(),
+                    column,
                 }
             })
             .collect();
@@ -303,11 +311,12 @@ where
     fn on_row_right_click(
         &mut self,
         _: &MouseDownEvent,
-        row_ix: usize,
+        row_ix: Option<usize>,
         _: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        self.right_clicked_row = Some(row_ix);
+        self.right_clicked_row = row_ix;
+        cx.emit(TableEvent::RightClickedRow(row_ix));
     }
 
     fn on_row_left_click(
@@ -317,6 +326,10 @@ where
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.row_selectable {
+            return;
+        }
+
         self.set_selected_row(row_ix, cx);
 
         if e.click_count() == 2 {
@@ -471,8 +484,6 @@ where
             return;
         }
 
-        const MIN_WIDTH: Pixels = px(10.0);
-        const MAX_WIDTH: Pixels = px(1200.0);
         let Some(col_group) = self.col_groups.get_mut(ix) else {
             return;
         };
@@ -480,21 +491,14 @@ where
         if !col_group.is_resizable() {
             return;
         }
-        let size = size.floor();
 
-        let old_width = col_group.width;
-        let new_width = size;
-        if new_width < MIN_WIDTH {
-            return;
-        }
-        let changed_width = new_width - old_width;
-        // If change size is less than 1px, do nothing.
-        if changed_width > px(-1.0) && changed_width < px(1.0) {
-            return;
-        }
-        col_group.width = new_width.min(MAX_WIDTH);
+        let new_width = size.clamp(col_group.column.min_width, col_group.column.max_width);
 
-        cx.notify();
+        // Only update if it actually changed
+        if col_group.width != new_width {
+            col_group.width = new_width;
+            cx.notify();
+        }
     }
 
     fn perform_sort(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -559,7 +563,7 @@ where
         let threshold = self.delegate.load_more_threshold();
         // Securely handle subtract logic to prevent attempt to subtract with overflow
         if visible_end >= rows_count.saturating_sub(threshold) {
-            if !self.delegate.is_eof(cx) {
+            if !self.delegate.has_more(cx) {
                 return;
             }
 
@@ -608,7 +612,6 @@ where
 
         let col_width = col_group.width;
         let col_padding = col_group.column.paddings;
-
         div()
             .w(col_width)
             .h_full()
@@ -681,7 +684,7 @@ where
                     .h_full()
                     .justify_center()
                     .bg(cx.theme().table_row_border)
-                    .group_hover(group_id, |this| this.bg(cx.theme().border).h_full())
+                    .group_hover(&group_id, |this| this.bg(cx.theme().border).h_full())
                     .w(px(1.)),
             )
             .on_drag_move(
@@ -852,16 +855,9 @@ where
             // resize handle
             .child(self.render_resize_handle(col_ix, window, cx))
             // to save the bounds of this col.
-            .child({
+            .on_prepaint({
                 let view = cx.entity().clone();
-                canvas(
-                    move |bounds, _, cx| {
-                        view.update(cx, |r, _| r.col_groups[col_ix].bounds = bounds)
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full()
+                move |bounds, _, cx| view.update(cx, |r, _| r.col_groups[col_ix].bounds = bounds)
             })
     }
 
@@ -919,16 +915,9 @@ where
                                 .border_r_1()
                                 .border_color(cx.theme().border),
                         )
-                        .child(
-                            canvas(
-                                move |bounds, _, cx| {
-                                    view.update(cx, |r, _| r.fixed_head_cols_bounds = bounds)
-                                },
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .size_full(),
-                        ),
+                        .on_prepaint(move |bounds, _, cx| {
+                            view.update(cx, |r, _| r.fixed_head_cols_bounds = bounds)
+                        }),
                 )
             })
             .child(
@@ -1083,17 +1072,23 @@ where
                     this.when(
                         is_selected && self.selection_state == SelectionState::Row,
                         |this| {
-                            this.border_color(gpui::transparent_white()).child(
-                                div()
-                                    .top(if row_ix == 0 { px(0.) } else { px(-1.) })
-                                    .left(px(0.))
-                                    .right(px(0.))
-                                    .bottom(px(-1.))
-                                    .absolute()
-                                    .bg(cx.theme().table_active)
-                                    .border_1()
-                                    .border_color(cx.theme().table_active_border),
-                            )
+                            this.map(|this| {
+                                if cx.theme().list.active_highlight {
+                                    this.border_color(gpui::transparent_white()).child(
+                                        div()
+                                            .top(if row_ix == 0 { px(0.) } else { px(-1.) })
+                                            .left(px(0.))
+                                            .right(px(0.))
+                                            .bottom(px(-1.))
+                                            .absolute()
+                                            .bg(cx.theme().table_active)
+                                            .border_1()
+                                            .border_color(cx.theme().table_active_border),
+                                    )
+                                } else {
+                                    this.bg(cx.theme().accent)
+                                }
+                            })
                         },
                     )
                 })
@@ -1113,7 +1108,7 @@ where
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, e, window, cx| {
-                        this.on_row_right_click(e, row_ix, window, cx);
+                        this.on_row_right_click(e, Some(row_ix), window, cx);
                     }),
                 )
                 .on_click(cx.listener(move |this, e, window, cx| {
@@ -1387,7 +1382,7 @@ where
                             .flex_grow()
                             .size_full()
                             .with_sizing_behavior(ListSizingBehavior::Auto)
-                            .track_scroll(self.vertical_scroll_handle.clone())
+                            .track_scroll(&self.vertical_scroll_handle)
                             .into_any_element(),
                         ),
                     )
@@ -1404,19 +1399,16 @@ where
                         &self.horizontal_scroll_handle,
                     ))
                     .when(right_clicked_row.is_some(), |this| {
-                        this.on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.right_clicked_row = None;
+                        this.on_mouse_down_out(cx.listener(|this, e, window, cx| {
+                            this.on_row_right_click(e, None, window, cx);
                             cx.notify();
                         }))
                     })
             })
-            .child(canvas(
-                {
-                    let state = cx.entity();
-                    move |bounds, _, cx| state.update(cx, |state, _| state.bounds = bounds)
-                },
-                |_, _, _, _| {},
-            ))
+            .on_prepaint({
+                let state = cx.entity();
+                move |bounds, _, cx| state.update(cx, |state, _| state.bounds = bounds)
+            })
             .when(!window.is_inspector_picking(cx), |this| {
                 this.child(
                     div()

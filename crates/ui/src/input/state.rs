@@ -10,6 +10,7 @@ use gpui::{
     Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
     Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
 };
+use gpui::{Half, TextAlign};
 use ropey::{Rope, RopeSlice};
 use serde::Deserialize;
 use std::ops::Range;
@@ -23,6 +24,7 @@ use super::{
 };
 use crate::Size;
 use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
+use crate::input::blink_cursor::CURSOR_WIDTH;
 use crate::input::movement::MoveDirection;
 use crate::input::{
     HoverDefinition, Lsp, Position,
@@ -31,7 +33,7 @@ use crate::input::{
     search::{self, SearchPanel},
     text_wrapper::LineLayout,
 };
-use crate::input::{RopeExt as _, Selection};
+use crate::input::{InlineCompletion, RopeExt as _, Selection};
 use crate::{Root, history::History};
 use crate::{highlighter::DiagnosticSet, input::text_wrapper::LineItem};
 
@@ -240,6 +242,10 @@ pub(super) struct LastLayout {
     pub(super) line_number_width: Pixels,
     /// The cursor position (top, left) in pixels.
     pub(super) cursor_bounds: Option<Bounds<Pixels>>,
+    /// The text align of the text layout.
+    pub(super) text_align: TextAlign,
+    /// The content width of the text layout.
+    pub(super) content_width: Pixels,
 }
 
 impl LastLayout {
@@ -254,6 +260,15 @@ impl LastLayout {
         }
 
         self.lines.get(row.saturating_sub(self.visible_range.start))
+    }
+
+    /// Get the alignment offset for the given line width.
+    pub(super) fn alignment_offset(&self, line_width: Pixels) -> Pixels {
+        match self.text_align {
+            TextAlign::Left => px(0.),
+            TextAlign::Center => (self.content_width - line_width).half().max(px(0.)),
+            TextAlign::Right => (self.content_width - line_width).max(px(0.)),
+        }
     }
 }
 
@@ -298,6 +313,7 @@ pub struct InputState {
     pub(crate) deferred_scroll_offset: Option<Point<Pixels>>,
     /// The size of the scrollable content.
     pub(crate) scroll_size: gpui::Size<Pixels>,
+    pub(super) text_align: TextAlign,
 
     /// The mask pattern for formatting the input text
     pub(crate) mask_pattern: MaskPattern,
@@ -331,6 +347,7 @@ pub struct InputState {
     _subscriptions: Vec<Subscription>,
 
     pub(super) _context_menu_task: Task<Result<()>>,
+    pub(super) inline_completion: InlineCompletion,
 }
 
 impl EventEmitter<InputEvent> for InputState {}
@@ -397,6 +414,7 @@ impl InputState {
             preferred_column: None,
             placeholder: SharedString::default(),
             mask_pattern: MaskPattern::default(),
+            text_align: TextAlign::Left,
             lsp: Lsp::default(),
             diagnostic_popover: None,
             context_menu: None,
@@ -409,6 +427,7 @@ impl InputState {
             _subscriptions,
             _context_menu_task: Task::ready(Ok(())),
             _pending_update: false,
+            inline_completion: InlineCompletion::default(),
         }
     }
 
@@ -565,7 +584,6 @@ impl InputState {
     /// - The index of the line (zero-based) containing the offset.
     /// - The index of the sub-line (zero-based) within the line containing the offset.
     /// - The position of the offset.
-    #[allow(unused)]
     pub(super) fn line_and_position_for_offset(
         &self,
         offset: usize,
@@ -579,7 +597,7 @@ impl InputState {
         let mut y_offset = last_layout.visible_top;
         for (line_index, line) in last_layout.lines.iter().enumerate() {
             let local_offset = offset.saturating_sub(prev_lines_offset);
-            if let Some(pos) = line.position_for_index(local_offset, line_height) {
+            if let Some(pos) = line.position_for_index(local_offset, last_layout) {
                 let sub_line_index = (pos.y / line_height) as usize;
                 let adjusted_pos = point(pos.x + last_layout.line_number_width, pos.y + y_offset);
                 return (line_index, sub_line_index, Some(adjusted_pos));
@@ -821,7 +839,7 @@ impl InputState {
 
     /// Focus the input field.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.start(cx);
         });
@@ -923,8 +941,7 @@ impl InputState {
         let left_part = self.text.slice(0..offset).to_string();
 
         UnicodeSegmentation::split_word_bound_indices(left_part.as_str())
-            .filter(|(_, s)| !s.trim_start().is_empty())
-            .next_back()
+            .rfind(|(_, s)| !s.trim_start().is_empty())
             .map(|(i, _)| i)
             .unwrap_or(0)
     }
@@ -1142,6 +1159,11 @@ impl InputState {
             return;
         }
 
+        // Clear inline completion on enter (user chose not to accept it)
+        if self.has_inline_completion() {
+            self.clear_inline_completion(cx);
+        }
+
         if self.mode.is_multi_line() {
             // Get current line indent
             let indent = if self.mode.is_code_editor() {
@@ -1175,6 +1197,12 @@ impl InputState {
             return;
         }
 
+        // Clear inline completion on escape
+        if self.has_inline_completion() {
+            self.clear_inline_completion(cx);
+            return; // Consume the escape, don't propagate
+        }
+
         if self.ime_marked_range.is_some() {
             self.unmark_text(window, cx);
         }
@@ -1192,6 +1220,9 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Clear inline completion on any mouse interaction
+        self.clear_inline_completion(cx);
+
         // If there have IME marked range and is empty (Means pressed Esc to abort IME typing)
         // Clear the marked range.
         if let Some(ime_marked_range) = &self.ime_marked_range {
@@ -1307,11 +1338,17 @@ impl InputState {
         cx: &mut Context<Self>,
     ) {
         let mut offset = offset.unwrap_or(self.scroll_handle.offset());
+        // In addition to left alignment, a cursor position will be reserved on the right side
+        let safe_x_offset = if self.text_align == TextAlign::Left {
+            px(0.)
+        } else {
+            -CURSOR_WIDTH
+        };
 
         let safe_y_range =
             (-self.scroll_size.height + self.input_bounds.size.height).min(px(0.0))..px(0.);
-        let safe_x_range =
-            (-self.scroll_size.width + self.input_bounds.size.width).min(px(0.0))..px(0.);
+        let safe_x_range = (-self.scroll_size.width + self.input_bounds.size.width + safe_x_offset)
+            .min(safe_x_offset)..px(0.);
 
         offset.y = if self.mode.is_single_line() {
             px(0.)
@@ -1356,20 +1393,26 @@ impl InputState {
             row_offset_y += wrap_line.height(line_height);
         }
 
+        // Apart from left alignment, just leave enough space for the cursor size on the right side.
+        let safety_margin = if last_layout.text_align == TextAlign::Left {
+            RIGHT_MARGIN
+        } else {
+            CURSOR_WIDTH
+        };
         if let Some(line) = last_layout
             .lines
             .get(row.saturating_sub(last_layout.visible_range.start))
         {
             // Check to scroll horizontally and soft wrap lines
-            if let Some(pos) = line.position_for_index(point.column, line_height) {
+            if let Some(pos) = line.position_for_index(point.column, last_layout) {
                 let bounds_width = bounds.size.width - last_layout.line_number_width;
                 let col_offset_x = pos.x;
                 row_offset_y += pos.y;
-                if col_offset_x - RIGHT_MARGIN < -scroll_offset.x {
+                if col_offset_x - safety_margin < -scroll_offset.x {
                     // If the position is out of the visible area, scroll to make it visible
-                    scroll_offset.x = -col_offset_x + RIGHT_MARGIN;
-                } else if col_offset_x + RIGHT_MARGIN > -scroll_offset.x + bounds_width {
-                    scroll_offset.x = -(col_offset_x - bounds_width + RIGHT_MARGIN);
+                    scroll_offset.x = -col_offset_x + safety_margin;
+                } else if col_offset_x + safety_margin > -scroll_offset.x + bounds_width {
+                    scroll_offset.x = -(col_offset_x - bounds_width + safety_margin);
                 }
             }
         }
@@ -1541,11 +1584,11 @@ impl InputState {
 
             // Return offset by use closest_index_for_x if is single line mode.
             if self.mode.is_single_line() {
-                index = line_layout.closest_index_for_x(pos.x);
+                index = line_layout.closest_index_for_x(pos.x, last_layout);
                 break;
             }
 
-            if let Some(v) = line_layout.closest_index_for_position(pos, line_height) {
+            if let Some(v) = line_layout.closest_index_for_position(pos, last_layout) {
                 index += v;
                 break;
             } else if pos.y < px(0.) {
@@ -1596,6 +1639,8 @@ impl InputState {
     ///
     /// Ensure the offset use self.next_boundary or self.previous_boundary to get the correct offset.
     pub(crate) fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.clear_inline_completion(cx);
+
         let offset = offset.clamp(0, self.text.len());
         if self.selection_reversed {
             self.selected_range.start = offset
@@ -1680,6 +1725,7 @@ impl InputState {
     /// Returns the true to let InputElement to render cursor, when Input is focused and current BlinkCursor is visible.
     pub(crate) fn show_cursor(&self, window: &Window, cx: &App) -> bool {
         (self.focus_handle.is_focused(window) || self.is_context_menu_open(cx))
+            && !self.disabled
             && self.blink_cursor.read(cx).visible()
             && window.is_window_active()
     }
@@ -1702,6 +1748,7 @@ impl InputState {
         self.hover_popover = None;
         self.diagnostic_popover = None;
         self.context_menu = None;
+        self.clear_inline_completion(cx);
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.stop(cx);
         });
@@ -2085,7 +2132,7 @@ impl EntityInputHandler for InputState {
 
             if start_origin.is_none() {
                 if let Some(p) =
-                    line.position_for_index(range.start.saturating_sub(index_offset), line_height)
+                    line.position_for_index(range.start.saturating_sub(index_offset), last_layout)
                 {
                     start_origin = Some(p + point(px(0.), y_offset));
                 }
@@ -2093,7 +2140,7 @@ impl EntityInputHandler for InputState {
 
             if end_origin.is_none() {
                 if let Some(p) =
-                    line.position_for_index(range.end.saturating_sub(index_offset), line_height)
+                    line.position_for_index(range.end.saturating_sub(index_offset), last_layout)
                 {
                     end_origin = Some(p + point(px(0.), y_offset));
                 }
@@ -2122,12 +2169,11 @@ impl EntityInputHandler for InputState {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let last_layout = self.last_layout.as_ref()?;
-        let line_height = last_layout.line_height;
         let line_point = self.last_bounds?.localize(&point)?;
         let offset = last_layout.visible_range_offset.start;
 
         for line in last_layout.lines.iter() {
-            if let Some(utf8_index) = line.index_for_position(line_point, line_height) {
+            if let Some(utf8_index) = line.index_for_position(line_point, last_layout) {
                 return Some(self.offset_to_utf16(offset + utf8_index));
             }
         }

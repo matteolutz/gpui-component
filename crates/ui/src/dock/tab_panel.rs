@@ -726,11 +726,9 @@ impl TabPanel {
                 }
 
                 Some(
-                    Tab::default()
-                        .when(!has_extend_dock_button && ix == 0, |this| {
-                            // Right 1px for avoid border overlap with the first tab
-                            this.right(px(1.))
-                        })
+                    Tab::new()
+                        .ix(ix)
+                        .tab_bar_prefix(has_extend_dock_button)
                         .map(|this| {
                             if let Some(tab_name) = panel.tab_name(cx) {
                                 this.child(tab_name)
@@ -1095,7 +1093,7 @@ impl TabPanel {
 
     fn focus_active_panel(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(active_panel) = self.active_panel(cx) {
-            active_panel.focus_handle(cx).focus(window);
+            active_panel.focus_handle(cx).focus(window, cx);
         }
     }
 
