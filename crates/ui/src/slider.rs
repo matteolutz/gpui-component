@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::{ActiveTheme, AxisExt, ElementExt, StyledExt, h_flex};
+use crate::{ActiveTheme, AxisExt, Sizable, Size, StyledExt, h_flex};
 use gpui::{
     Along, App, AppContext as _, Axis, Background, Bounds, Context, Corners, DefiniteLength,
     DragMoveEvent, Empty, Entity, EntityId, EventEmitter, Hsla, InteractiveElement, IntoElement,
@@ -382,6 +382,14 @@ pub struct Slider {
     axis: Axis,
     style: StyleRefinement,
     disabled: bool,
+    size: Size,
+}
+
+impl Sizable for Slider {
+    fn with_size(mut self, size: impl Into<Size>) -> Self {
+        self.size = size.into();
+        self
+    }
 }
 
 impl Slider {
@@ -392,6 +400,7 @@ impl Slider {
             state: state.clone(),
             style: StyleRefinement::default(),
             disabled: false,
+            size: Default::default(),
         }
     }
 
@@ -413,6 +422,16 @@ impl Slider {
         self
     }
 
+    fn size_factor(&self) -> f32 {
+        match self.size {
+            Size::Large => 1.75,
+            Size::Medium => 1.0,
+            Size::Small => 0.75,
+            Size::XSmall => 0.5,
+            _ => 1.0,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_thumb(
         &self,
@@ -432,14 +451,20 @@ impl Slider {
             return div().id(id);
         }
 
+        let size_factor = self.size_factor();
+
         div()
             .id(id)
             .absolute()
             .when(axis.is_horizontal(), |this| {
-                this.top(px(-5.)).left(start).ml(-px(8.))
+                this.top(px(-5. * size_factor))
+                    .left(start_pos)
+                    .ml(-px(8. * size_factor))
             })
             .when(axis.is_vertical(), |this| {
-                this.bottom(start).left(px(-5.)).mb(-px(8.))
+                this.bottom(start_pos)
+                    .left(px(-5. * size_factor))
+                    .mb(-px(8. * size_factor))
             })
             .flex()
             .items_center()
@@ -448,7 +473,7 @@ impl Slider {
             .corner_radii(radius)
             .bg(bar_color.opacity(0.5))
             .when(cx.theme().shadow, |this| this.shadow_md())
-            .size_4()
+            .size(AbsoluteLength::Rems(Rems(size_factor)))
             .p(px(1.))
             .child(
                 div()
@@ -504,6 +529,8 @@ impl RenderOnce for Slider {
         let bar_start = relative(percentage.start);
         let bar_end = relative(1. - percentage.end);
         let rem_size = window.rem_size();
+
+        let size_factor = self.size_factor();
 
         let bar_color = self
             .style
@@ -604,18 +631,30 @@ impl RenderOnce for Slider {
                         ))
                     })
                     .when(axis.is_horizontal(), |this| {
-                        this.items_center().h_6().w_full()
+                        this.items_center()
+                            .h(AbsoluteLength::Rems(Rems(1.5 * size_factor)))
+                            .w_full()
                     })
                     .when(axis.is_vertical(), |this| {
-                        this.justify_center().w_6().h_full()
+                        this.justify_center()
+                            .w(AbsoluteLength::Rems(Rems(1.5 * size_factor)))
+                            .h_full()
                     })
                     .flex_shrink_0()
                     .child(
                         div()
                             .id("slider-bar")
                             .relative()
-                            .when(axis.is_horizontal(), |this| this.w_full().h_1p5())
-                            .when(axis.is_vertical(), |this| this.h_full().w_1p5())
+                            .when(axis.is_horizontal(), |this| {
+                                this.w_full()
+                                    .h_1p5()
+                                    .h(AbsoluteLength::Rems(Rems(0.375 * size_factor)))
+                            })
+                            .when(axis.is_vertical(), |this| {
+                                this.h_full()
+                                    .w_1p5()
+                                    .w(AbsoluteLength::Rems(Rems(0.375 * size_factor)))
+                            })
                             .bg(bar_color.opacity(0.2))
                             .active(|this| this.bg(bar_color.opacity(0.4)))
                             .corner_radii(radius)
