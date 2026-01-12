@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, Corner, Div, Edges, ElementId, InteractiveElement, IntoElement, ParentElement,
-    Pixels, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement as _, StyleRefinement,
-    Styled, Window, div, prelude::FluentBuilder as _, px
+    RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 use std::rc::Rc;

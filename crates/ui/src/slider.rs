@@ -1,11 +1,11 @@
 use std::ops::Range;
 
-use crate::{ActiveTheme, AxisExt, Sizable, Size, StyledExt, h_flex};
+use crate::{ActiveTheme, AxisExt, ElementExt, Sizable, Size, StyledExt, h_flex};
 use gpui::{
-    Along, App, AppContext as _, Axis, Background, Bounds, Context, Corners, DefiniteLength,
-    DragMoveEvent, Empty, Entity, EntityId, EventEmitter, Hsla, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, RenderOnce,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
+    AbsoluteLength, Along, App, AppContext as _, Axis, Background, Bounds, Context, Corners,
+    DefiniteLength, DragMoveEvent, Empty, Entity, EntityId, EventEmitter, Hsla, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Rems, Render,
+    RenderOnce, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _, px, relative,
 };
 
@@ -458,11 +458,11 @@ impl Slider {
             .absolute()
             .when(axis.is_horizontal(), |this| {
                 this.top(px(-5. * size_factor))
-                    .left(start_pos)
+                    .left(start)
                     .ml(-px(8. * size_factor))
             })
             .when(axis.is_vertical(), |this| {
-                this.bottom(start_pos)
+                this.bottom(start)
                     .left(px(-5. * size_factor))
                     .mb(-px(8. * size_factor))
             })
