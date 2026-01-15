@@ -651,7 +651,7 @@ impl Element for Scrollbar {
                                 let next_delay = Duration::from_secs_f32(FADE_OUT_DELAY - elapsed);
                                 window
                                     .spawn(cx, async move |cx| {
-                                        Timer::after(next_delay).await;
+                                        cx.background_executor().timer(next_delay).await;
                                         state.set(state.get().with_idle_timer_scheduled(false));
                                         cx.update(|_, cx| cx.notify(current_view)).ok();
                                     })

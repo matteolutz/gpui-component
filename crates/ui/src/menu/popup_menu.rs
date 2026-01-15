@@ -974,6 +974,9 @@ impl PopupMenu {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if e.button == MouseButton::Left {
+            return;
+        }
         self.handle_dismiss(&e.position, window, cx);
     }
 
@@ -1304,6 +1307,7 @@ impl Render for PopupMenu {
             .popover_style(cx)
             .text_color(cx.theme().popover_foreground)
             .relative()
+            .occlude()
             .child(
                 v_flex()
                     .id("items")

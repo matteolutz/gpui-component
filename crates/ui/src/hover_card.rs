@@ -168,7 +168,7 @@ impl HoverCardState {
         let delay = self.open_delay;
 
         self.open_task = Some(cx.spawn(async move |this, cx| {
-            Timer::after(delay).await;
+            cx.background_executor().timer(delay).await;
 
             let _ = this.update(cx, |state, cx| {
                 if state.epoch == epoch {
@@ -185,7 +185,7 @@ impl HoverCardState {
         let delay = self.close_delay;
 
         self.close_task = Some(cx.spawn(async move |this, cx| {
-            Timer::after(delay).await;
+            cx.background_executor().timer(delay).await;
 
             let _ = this.update(cx, |state, cx| {
                 if state.epoch == epoch && !state.is_hovering_trigger && !state.is_hovering_content
