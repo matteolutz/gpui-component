@@ -4,7 +4,7 @@ use crate::{ActiveTheme, AxisExt, ElementExt, Sizable, Size, StyledExt, h_flex};
 use gpui::{
     AbsoluteLength, Along, App, AppContext as _, Axis, Background, Bounds, Context, Corners,
     DefiniteLength, DragMoveEvent, Empty, Entity, EntityId, EventEmitter, Hsla, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Rems, Render,
+    IntoElement, IsZero, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Rems, Render,
     RenderOnce, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _, px, relative,
 };
@@ -545,7 +545,7 @@ impl RenderOnce for Slider {
             .unwrap_or_else(|| cx.theme().slider_thumb);
         let corner_radii = self.style.corner_radii.clone();
         let default_radius = px(999.);
-        let radius = Corners {
+        let mut radius = Corners {
             top_left: corner_radii
                 .top_left
                 .map(|v| v.to_pixels(rem_size))
@@ -563,6 +563,12 @@ impl RenderOnce for Slider {
                 .map(|v| v.to_pixels(rem_size))
                 .unwrap_or(default_radius),
         };
+        if cx.theme().radius.is_zero() {
+            radius.top_left = px(0.);
+            radius.top_right = px(0.);
+            radius.bottom_left = px(0.);
+            radius.bottom_right = px(0.);
+        }
 
         div()
             .id(("slider", self.state.entity_id()))
@@ -668,7 +674,7 @@ impl RenderOnce for Slider {
                                         this.w_full().bottom(bar_start).top(bar_end)
                                     })
                                     .bg(bar_color)
-                                    .rounded_full(),
+                                    .when(!cx.theme().radius.is_zero(), |this| this.rounded_full()),
                             )
                             .when(is_range, |this| {
                                 this.child(self.render_thumb(
