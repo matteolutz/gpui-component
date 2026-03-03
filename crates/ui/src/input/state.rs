@@ -29,13 +29,12 @@ use crate::highlighter::DiagnosticSet;
 use crate::input::blink_cursor::CURSOR_WIDTH;
 use crate::input::movement::MoveDirection;
 use crate::input::{
-    HoverDefinition, Lsp, Position,
+    HoverDefinition, InlineCompletion, Lsp, Position, RopeExt as _, Selection,
     display_map::LineLayout,
     element::RIGHT_MARGIN,
     popovers::{ContextMenu, DiagnosticPopover, HoverPopover, MouseContextMenu},
     search::{self, SearchPanel},
 };
-use crate::input::{InlineCompletion, RopeExt as _, Selection};
 use crate::{Root, history::History};
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -863,6 +862,12 @@ impl InputState {
     /// Return the value of the input field.
     pub fn value(&self) -> SharedString {
         SharedString::new(self.text.to_string())
+    }
+
+    /// Return the portion of the value within the input field that
+    /// is selected by the user
+    pub fn selected_value(&self) -> SharedString {
+        SharedString::new(self.selected_text().to_string())
     }
 
     /// Return the value without mask.
@@ -1984,27 +1989,6 @@ impl InputState {
             last_bounds.origin + start_pos,
             last_bounds.origin + end_pos + point(px(0.), last_layout.line_height),
         ))
-    }
-
-    /// Replace text by [`lsp_types::Range`].
-    ///
-    /// See also: [`EntityInputHandler::replace_text_in_range`]
-    #[allow(unused)]
-    pub(crate) fn replace_text_in_lsp_range(
-        &mut self,
-        lsp_range: &lsp_types::Range,
-        new_text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let start = self.text.position_to_offset(&lsp_range.start);
-        let end = self.text.position_to_offset(&lsp_range.end);
-        self.replace_text_in_range_silent(
-            Some(self.range_to_utf16(&(start..end))),
-            new_text,
-            window,
-            cx,
-        );
     }
 
     /// Replace text in range in silent.

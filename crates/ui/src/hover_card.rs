@@ -5,7 +5,7 @@ use gpui::{
 };
 use smol::Timer;
 use std::rc::Rc;
-use std::time::Duration;
+use instant::Duration;
 
 use crate::{Anchor, ElementExt, StyledExt as _, popover::Popover};
 
