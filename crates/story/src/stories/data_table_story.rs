@@ -20,7 +20,10 @@ use gpui_component::{
     label::Label,
     menu::{DropdownMenu, PopupMenu},
     spinner::Spinner,
-    table::{Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState},
+    table::{
+        Column, ColumnFixed, ColumnGroup, ColumnSort, DataTable, TableDelegate, TableEvent,
+        TableState,
+    },
     v_flex,
 };
 use serde::{Deserialize, Serialize};
@@ -185,10 +188,13 @@ fn random_stocks(size: usize) -> Vec<Stock> {
 struct StockTableDelegate {
     stocks: Vec<Stock>,
     columns: Vec<Column>,
+    /// Number of extra "Column N" columns appended after the built-in columns.
+    extra_columns_count: usize,
     size: Size,
     loading: bool,
     lazy_load: bool,
     full_loading: bool,
+    show_group_headers: bool,
     clicked_row: Option<usize>,
     eof: bool,
     visible_rows: Range<usize>,
@@ -261,8 +267,10 @@ impl StockTableDelegate {
                 Column::new("day_120_ranking", "120d Ranking"),
                 Column::new("day_250_ranking", "250d Ranking"),
             ],
+            extra_columns_count: 0,
             loading: false,
             full_loading: false,
+            show_group_headers: true,
             eof: false,
             visible_cols: Range::default(),
             visible_rows: Range::default(),
@@ -324,7 +332,7 @@ impl StockTableDelegate {
 
 impl TableDelegate for StockTableDelegate {
     fn columns_count(&self, _: &App) -> usize {
-        self.columns.len()
+        self.columns.len() + self.extra_columns_count
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -332,22 +340,69 @@ impl TableDelegate for StockTableDelegate {
     }
 
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
-        self.columns[col_ix].clone()
+        if let Some(col) = self.columns.get(col_ix) {
+            col.clone()
+        } else {
+            let n = col_ix - self.columns.len() + 1;
+            Column::new(format!("extra_{n}"), format!("Column {n}"))
+        }
     }
 
+    fn group_headers(&self, cx: &App) -> Option<Vec<Vec<ColumnGroup>>> {
+        if !self.show_group_headers {
+            return None;
+        }
+        Some(
+        vec![
+            vec![
+                ColumnGroup {
+                    label: "Stock Info".into(),
+                    span: 4,
+                },
+                ColumnGroup {
+                    label: "Price & Change".into(),
+                    span: 3,
+                },
+            ],
+            vec![
+                ColumnGroup {
+                    label: "Identity".into(),
+                    span: 4,
+                },
+                ColumnGroup {
+                    label: "Stock Info".into(),
+                    span: 7,
+                },
+                ColumnGroup {
+                    label: "Ranking & Stats".into(),
+                    span: 14,
+                },
+                ColumnGroup {
+                    label: "Market Data".into(),
+                    span: self.columns_count(cx) - 25,
+                },
+            ],
+        ])
+    }
     fn render_th(
         &mut self,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let col = self.columns.get(col_ix).unwrap();
+        let col = self.column(col_ix, cx);
 
         div()
             .child(col.name.clone())
-            .when(col_ix >= 3 && col_ix <= 10, |this| this.table_cell_size(self.size))
-            .when(col.align == TextAlign::Center, |this| this.h_flex().w_full().justify_center())
-            .when(col.align == TextAlign::Right, |this| this.h_flex().w_full().justify_end())
+            .when(col_ix >= 3 && col_ix <= 10, |this| {
+                this.table_cell_size(self.size)
+            })
+            .when(col.align == TextAlign::Center, |this| {
+                this.h_flex().w_full().justify_center()
+            })
+            .when(col.align == TextAlign::Right, |this| {
+                this.h_flex().w_full().justify_end()
+            })
     }
 
     fn context_menu(
@@ -395,7 +450,9 @@ impl TableDelegate for StockTableDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let stock = self.stocks.get(row_ix).unwrap();
-        let col = self.columns.get(col_ix).unwrap();
+        let Some(col) = self.columns.get(col_ix) else {
+            return div().child("--").into_any_element();
+        };
 
         match col.key.as_ref() {
             "id" => div()
@@ -618,6 +675,7 @@ impl TableDelegate for StockTableDelegate {
 pub struct DataTableStory {
     table: Entity<TableState<StockTableDelegate>>,
     num_stocks_input: Entity<InputState>,
+    num_extra_cols_input: Entity<InputState>,
     stripe: bool,
     refresh_data: bool,
     size: Size,
@@ -656,12 +714,19 @@ impl DataTableStory {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Create the number input field with validation for positive integers
         let num_stocks_input = cx.new(|cx| {
             let mut input = InputState::new(window, cx)
                 .placeholder("Enter number of Stocks to display")
                 .validate(|s, _| s.parse::<usize>().is_ok());
             input.set_value("5000", window, cx);
+            input
+        });
+
+        let num_extra_cols_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx)
+                .placeholder("Extra columns")
+                .validate(|s, _| s.parse::<usize>().is_ok());
+            input.set_value("0", window, cx);
             input
         });
 
@@ -671,7 +736,7 @@ impl DataTableStory {
         let _subscriptions = vec![
             cx.subscribe_in(&table, window, Self::on_table_event),
             cx.subscribe_in(&num_stocks_input, window, Self::on_num_stocks_input_change),
-            // Spawn a background to random refresh the list
+            cx.subscribe_in(&num_extra_cols_input, window, Self::on_num_extra_cols_input_change),
         ];
 
         let _load_task = cx.spawn(async move |this, cx| {
@@ -703,6 +768,7 @@ impl DataTableStory {
         Self {
             table,
             num_stocks_input,
+            num_extra_cols_input,
             stripe: false,
             refresh_data: false,
             size: Size::default(),
@@ -730,6 +796,28 @@ impl DataTableStory {
 
                     self.table.update(cx, |table, _| {
                         table.delegate_mut().update_stocks(total_count);
+                    });
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_num_extra_cols_input_change(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                let text = self.num_extra_cols_input.read(cx).value().to_string();
+                if let Ok(count) = text.parse::<usize>() {
+                    self.table.update(cx, |table, cx| {
+                        table.delegate_mut().extra_columns_count = count;
+                        table.refresh(cx);
                     });
                     cx.notify();
                 }
@@ -807,6 +895,13 @@ impl DataTableStory {
     fn toggle_refresh_data(&mut self, checked: &bool, _: &mut Window, cx: &mut Context<Self>) {
         self.refresh_data = *checked;
         cx.notify();
+    }
+
+    fn toggle_group_headers(&mut self, checked: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            table.delegate_mut().show_group_headers = *checked;
+            table.refresh_header_layout(cx);
+        });
     }
 
     fn on_table_event(
@@ -982,6 +1077,12 @@ impl Render for DataTableStory {
                             .label("Refresh Data")
                             .selected(self.refresh_data)
                             .on_click(cx.listener(Self::toggle_refresh_data)),
+                    )
+                    .child(
+                        Checkbox::new("group-headers")
+                            .label("Group Headers")
+                            .checked(self.table.read(cx).delegate().show_group_headers)
+                            .on_click(cx.listener(Self::toggle_group_headers)),
                     ),
             )
             .child(
@@ -1089,11 +1190,18 @@ impl Render for DataTableStory {
                             h_flex()
                                 .gap_2()
                                 .flex_1()
-                                .child(Label::new("Number of Stocks:"))
+                                .child(Label::new("Stocks:"))
                                 .child(
                                     h_flex()
-                                        .min_w_32()
+                                        .min_w_24()
                                         .child(Input::new(&self.num_stocks_input).small())
+                                        .into_any_element(),
+                                )
+                                .child(Label::new("Extra Columns:"))
+                                .child(
+                                    h_flex()
+                                        .min_w_24()
+                                        .child(Input::new(&self.num_extra_cols_input).small())
                                         .into_any_element(),
                                 )
                                 .when(delegate.loading, |this| {
