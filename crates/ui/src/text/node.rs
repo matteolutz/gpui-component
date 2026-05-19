@@ -211,6 +211,7 @@ pub struct TextMark {
     pub bold: bool,
     pub italic: bool,
     pub strikethrough: bool,
+    pub underline: bool,
     pub code: bool,
     pub link: Option<LinkMark>,
 }
@@ -231,6 +232,11 @@ impl TextMark {
         self
     }
 
+    pub fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+
     pub fn code(mut self) -> Self {
         self.code = true;
         self
@@ -245,6 +251,7 @@ impl TextMark {
         self.bold |= other.bold;
         self.italic |= other.italic;
         self.strikethrough |= other.strikethrough;
+        self.underline |= other.underline;
         self.code |= other.code;
         if let Some(link) = other.link {
             self.link = Some(link);
@@ -697,6 +704,12 @@ impl Paragraph {
                             ..Default::default()
                         });
                     }
+                    if style.underline {
+                        highlight.underline = Some(gpui::UnderlineStyle {
+                            thickness: gpui::px(1.),
+                            ..Default::default()
+                        });
+                    }
                     if style.code {
                         highlight.background_color = Some(cx.theme().accent);
                     }
@@ -1086,6 +1099,7 @@ impl BlockNode {
                         .border_1()
                         .border_color(cx.theme().border)
                         .rounded(cx.theme().radius)
+                        .overflow_hidden()
                         .children({
                             let mut rows = Vec::with_capacity(table.children.len());
                             for (row_ix, row) in table.children.iter().enumerate() {
@@ -1192,7 +1206,7 @@ impl BlockNode {
                     text_size = (f)(*level, node_cx.style.heading_base_font_size);
                 }
 
-                h_flex()
+                div()
                     .id(SharedString::from(format!("h{}-{}", level, ix)))
                     .pb(rems(0.3))
                     .whitespace_normal()
