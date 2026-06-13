@@ -31,7 +31,6 @@ use super::{
 };
 use crate::Size;
 use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
-use crate::scroll::AutoScroll;
 use crate::highlighter::DiagnosticSet;
 #[cfg(not(target_family = "wasm"))]
 use crate::highlighter::LanguageRegistry;
@@ -41,10 +40,11 @@ use crate::input::{
     HoverDefinition, InlineCompletion, Lsp, Position, RopeExt as _, Selection,
     display_map::LineLayout,
     element::RIGHT_MARGIN,
-    popovers::{ContextMenu, DiagnosticPopover, HoverPopover, InputContextMenu},
-    search::{self, SearchPanel},
+    popovers::{ContextMenu, DiagnosticPopover, HoverPopover},
+    search::SearchPanel,
 };
-use crate::menu::PopupMenu;
+use crate::native_menu::NativeMenu;
+use crate::scroll::AutoScroll;
 use crate::{Root, history::History};
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -272,7 +272,6 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
     ]);
 
-    search::init(cx);
     number_input::init(cx);
 }
 
@@ -351,6 +350,7 @@ pub struct InputState {
     pub(super) selected_range: Selection,
     pub(super) search_panel: Option<Entity<SearchPanel>>,
     pub(super) searchable: bool,
+    pub(super) replaceable: bool,
     /// Range for save the selected word, use to keep word range when drag move.
     pub(super) selected_word_range: Option<Selection>,
     pub(super) selection_reversed: bool,
@@ -370,6 +370,10 @@ pub struct InputState {
     pub(super) clean_on_escape: bool,
     pub(super) submit_on_enter: bool,
     pub(super) soft_wrap: bool,
+    /// See [`Self::scroll_beyond_last_line`].
+    pub(super) scroll_beyond_last_line: Option<usize>,
+    /// See [`Self::cursor_surrounding_lines`].
+    pub(super) cursor_surrounding_lines: Option<usize>,
     pub(super) show_whitespaces: bool,
     /// This flag tells the renderer to prefer the end of the current visual line.
     pub(crate) cursor_line_end_affinity: bool,
@@ -392,17 +396,16 @@ pub struct InputState {
     diagnostic_popover: Option<Entity<DiagnosticPopover>>,
     /// Completion/CodeAction context menu
     pub(super) context_menu_content: Option<ContextMenu>,
-    pub(super) context_menu: Entity<InputContextMenu>,
 
-    /// An optional context menu builder to allow a custom context menu on the input.
+    /// An optional context menu builder to allow a custom right-click context menu on the input.
     ///
-    /// If set, this will override the built-in context menu and ignore the value set in [`Self::enable_context_menu`].
+    /// If set, this overrides the built-in context menu (and ignores [`Self::enable_context_menu`]).
     pub(super) context_menu_builder:
-        Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
+        Option<Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>>,
 
     /// Whether the context menu that shows on right-click is enabled.
     ///
-    /// This value will be ignored if a context menu builder is defined in [`Self::context_menu_builder`].
+    /// This value is ignored if a context menu builder is defined in [`Self::context_menu_builder`].
     pub(super) enable_context_menu: bool,
 
     /// A flag to indicate if we are currently inserting a completion item.
@@ -465,7 +468,6 @@ impl InputState {
         ];
 
         let text_style = window.text_style();
-        let mouse_context_menu = InputContextMenu::new(cx.entity(), window, cx);
 
         Self {
             focus_handle: focus_handle.clone(),
@@ -476,6 +478,7 @@ impl InputState {
             selected_range: Selection::default(),
             search_panel: None,
             searchable: false,
+            replaceable: true,
             selected_word_range: None,
             selection_reversed: false,
             ime_marked_range: None,
@@ -486,6 +489,8 @@ impl InputState {
             clean_on_escape: false,
             submit_on_enter: false,
             soft_wrap: true,
+            scroll_beyond_last_line: None,
+            cursor_surrounding_lines: None,
             show_whitespaces: false,
             loading: false,
             pattern: None,
@@ -512,7 +517,6 @@ impl InputState {
             lsp: Lsp::default(),
             diagnostic_popover: None,
             context_menu_content: None,
-            context_menu: mouse_context_menu,
             context_menu_builder: None,
             enable_context_menu: true,
             completion_inserting: false,
@@ -575,7 +579,7 @@ impl InputState {
     /// Sets whether the context menu that shows on right-click is enabled.
     ///
     /// The context menu is enabled by default.
-    /// This value will be ignored if a custom context menu is defined on the input.
+    /// This value is ignored if a custom context menu builder is defined on the input.
     pub fn context_menu(mut self, enable: bool) -> Self {
         self.enable_context_menu = enable;
         self
@@ -585,6 +589,12 @@ impl InputState {
     pub fn searchable(mut self, searchable: bool) -> Self {
         debug_assert!(self.mode.is_multi_line());
         self.searchable = searchable;
+        self
+    }
+
+    /// Set whether search UI allows replacement, default is true.
+    pub fn replaceable(mut self, allow: bool) -> Self {
+        self.replaceable = allow;
         self
     }
 
@@ -913,6 +923,63 @@ impl InputState {
     /// Update whether to show whitespace characters.
     pub fn set_show_whitespaces(&mut self, show: bool, _: &mut Window, cx: &mut Context<Self>) {
         self.show_whitespaces = show;
+        cx.notify();
+    }
+
+    /// Empty rows reserved below the last line of content ("scroll
+    /// beyond last line"), code-editor mode only. Mirrors VSCode's
+    /// `editor.scrollBeyondLastLine` / Zed's `scroll_beyond_last_line`.
+    ///
+    /// - `None` (default): half the viewport, floored at
+    ///   [`BOTTOM_MARGIN_ROWS`] line-heights.
+    /// - `Some(0)`: no trailing space; the cursor sits flush with the
+    ///   last row at scroll-max.
+    /// - `Some(n)`: exactly `n` rows.
+    pub fn scroll_beyond_last_line(mut self, rows: Option<usize>) -> Self {
+        self.scroll_beyond_last_line = rows;
+        self
+    }
+
+    /// Update [`Self::scroll_beyond_last_line`] after construction.
+    pub fn set_scroll_beyond_last_line(
+        &mut self,
+        rows: Option<usize>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.scroll_beyond_last_line == rows {
+            return;
+        }
+        self.scroll_beyond_last_line = rows;
+        cx.notify();
+    }
+
+    /// Minimum number of lines the cursor is kept clear of the viewport's
+    /// top/bottom edge before auto-scroll engages. Mirrors VSCode's
+    /// `editor.cursorSurroundingLines` / Zed's `vertical_scroll_margin`.
+    /// Orthogonal to [`Self::scroll_beyond_last_line`], which sizes the
+    /// empty region; this controls the cursor's resting distance from the
+    /// edge.
+    ///
+    /// - `None` (default): [`BOTTOM_MARGIN_ROWS`] lines, falling back to
+    ///   one line on small viewports.
+    /// - `Some(n)`: exactly `n` lines, clamped to half the viewport.
+    pub fn cursor_surrounding_lines(mut self, lines: Option<usize>) -> Self {
+        self.cursor_surrounding_lines = lines;
+        self
+    }
+
+    /// Update [`Self::cursor_surrounding_lines`] after construction.
+    pub fn set_cursor_surrounding_lines(
+        &mut self,
+        lines: Option<usize>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor_surrounding_lines == lines {
+            return;
+        }
+        self.cursor_surrounding_lines = lines;
         cx.notify();
     }
 
@@ -1433,12 +1500,88 @@ impl InputState {
         cx.propagate();
     }
 
+    /// Show the right-click context menu as a native OS menu.
+    pub(crate) fn handle_right_click_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        offset: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if crate::global_state::GlobalState::global(cx).is_in_deferred_context() {
+            return;
+        }
+
+        if !self.selected_range.contains(offset) {
+            self.move_to(offset, None, cx);
+        }
+
+        // A custom builder fully replaces the built-in context menu.
+        let menu = if let Some(builder) = self.context_menu_builder.clone() {
+            builder(NativeMenu::new(), window, cx)
+        } else {
+            let is_code_editor = self.mode.is_code_editor();
+            if is_code_editor {
+                self.handle_hover_definition(offset, window, cx);
+            }
+
+            let is_enable = !self.disabled;
+            let has_goto_definition = is_enable && self.lsp.definition_provider.is_some();
+            let has_code_action = is_enable && !self.lsp.code_action_providers.is_empty();
+            let is_selected = !self.selected_range.is_empty();
+            let has_paste = is_enable && cx.read_from_clipboard().is_some();
+
+            let mut menu = NativeMenu::new();
+            if is_code_editor {
+                menu = menu
+                    .menu_with_disabled(
+                        rust_i18n::t!("Input.Go to Definition"),
+                        !has_goto_definition,
+                        Box::new(crate::input::GoToDefinition),
+                    )
+                    .menu_with_disabled(
+                        rust_i18n::t!("Input.Show Code Actions"),
+                        !has_code_action,
+                        Box::new(crate::input::ToggleCodeActions),
+                    )
+                    .separator();
+            }
+
+            menu.menu_with_disabled(
+                rust_i18n::t!("Input.Cut"),
+                !(is_enable && is_selected),
+                Box::new(crate::input::Cut),
+            )
+            .menu_with_disabled(
+                rust_i18n::t!("Input.Copy"),
+                !is_selected,
+                Box::new(crate::input::Copy),
+            )
+            .menu_with_disabled(
+                rust_i18n::t!("Input.Paste"),
+                !has_paste,
+                Box::new(crate::input::Paste),
+            )
+            .separator()
+            .menu(
+                rust_i18n::t!("Input.Select All"),
+                Box::new(crate::input::SelectAll),
+            )
+        };
+
+        menu.show(event.position, window, cx);
+    }
+
     pub(super) fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Input has its own text selection; suppress the window-level text
+        // selection (Root) so it does not start a drag from here.
+        crate::global_state::GlobalState::suppress_text_selection(cx);
+
         // Clear inline completion on any mouse interaction
         self.clear_inline_completion(cx);
 
@@ -1661,10 +1804,17 @@ impl InputState {
             }
         }
 
-        // Check if row_offset_y is out of the viewport
-        // If row offset is not in the viewport, scroll to make it visible
+        // Scroll the row into view. Use the same edge clearance helper as
+        // `TextElement::layout_cursor` so both scroll-into-view paths agree
+        // (a mismatch flickered on `Down` at end-of-buffer with a small
+        // `cursor_surrounding_lines` override).
         let edge_height = if direction.is_some() && self.mode.is_code_editor() {
-            3 * line_height
+            super::element::cursor_surrounding_padding(
+                self.mode.is_auto_grow(),
+                self.cursor_surrounding_lines,
+                last_layout.visible_range.len(),
+                line_height,
+            )
         } else {
             line_height
         };
@@ -1683,8 +1833,12 @@ impl InputState {
             scroll_offset.y = scroll_offset.y.min(was_offset.y);
         }
 
+        // Clamp the deferred target into the same safe range that
+        // `update_scroll_offset` enforces on persist, so paint never shows an
+        // over-scrolled frame before the post-paint clamp pulls it back.
+        let safe_y_min = (-self.scroll_size.height + self.input_bounds.size.height).min(px(0.));
         scroll_offset.x = scroll_offset.x.min(px(0.));
-        scroll_offset.y = scroll_offset.y.min(px(0.));
+        scroll_offset.y = scroll_offset.y.clamp(safe_y_min, px(0.));
         self.deferred_scroll_offset = Some(scroll_offset);
         cx.notify();
     }
@@ -1789,6 +1943,14 @@ impl InputState {
     /// Current scroll offset of the editor viewport.
     pub fn scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
         self.scroll_handle.offset()
+    }
+
+    /// Set scroll offset of the editor viewport.
+    ///
+    /// The offset will be clamped to the valid range, and applied after the next layout.
+    pub fn set_scroll_offset(&mut self, offset: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.deferred_scroll_offset = Some(offset);
+        cx.notify();
     }
 
     /// Laid-out line height; `None` before first layout.
@@ -2682,7 +2844,7 @@ impl Render for InputState {
             .id("input-state")
             .flex_1()
             .when(self.mode.is_multi_line(), |this| this.h_full())
-            .flex_grow()
+            .flex_grow_1()
             .overflow_x_hidden()
             .child(TextElement::new(cx.entity().clone()).placeholder(self.placeholder.clone()))
             .children(self.diagnostic_popover.clone())
@@ -2844,5 +3006,71 @@ ORDER BY id
              Before: {:?}\nAfter: {:?}",
             colored_before, colored_after
         );
+    }
+
+    /// Regression test: `scroll_to` at end-of-buffer must produce a deferred
+    /// scroll target within the safe scroll range, so the painted frame
+    /// matches what `update_scroll_offset` persists (no jitter). A small
+    /// `cursor_surrounding_lines` override used to mismatch the hardcoded
+    /// 3-line edge clearance in `scroll_to`, overshooting `safe_y_min`.
+    #[gpui::test]
+    fn test_scroll_to_eob_does_not_overshoot_safe_range(cx: &mut TestAppContext) {
+        let input_view = InputView::new(cx);
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+
+        // JetBrains-style: 1 trailing empty row + 1-line cursor surrounding.
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_scroll_beyond_last_line(Some(1), window, cx);
+                state.set_cursor_surrounding_lines(Some(1), window, cx);
+                let text: String = (1..=50)
+                    .map(|i| format!("line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                state.set_value(text, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // Sanity: paint populated `scroll_size` and `input_bounds` — without
+        // these, `safe_y_min` below collapses to 0 and the assertion is vacuous.
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert!(
+                    state.scroll_size.height > px(0.),
+                    "scroll_size not populated by initial paint"
+                );
+                assert!(
+                    state.input_bounds.size.height > px(0.),
+                    "input_bounds not populated by initial paint"
+                );
+            });
+        });
+
+        // Move cursor to end with downward direction — same code path as a
+        // `Down` keystroke at EOB. `scroll_to` runs synchronously inside
+        // `move_to`; inspect `deferred_scroll_offset` in the same closure
+        // before the next paint consumes and clears it.
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                let end = state.text.len();
+                state.move_to(end, Some(MoveDirection::Down), cx);
+
+                let deferred = state
+                    .deferred_scroll_offset
+                    .expect("scroll_to should populate deferred_scroll_offset");
+                let safe_y_min =
+                    (-state.scroll_size.height + state.input_bounds.size.height).min(px(0.));
+
+                assert!(
+                    deferred.y >= safe_y_min,
+                    "deferred_scroll_offset.y = {:?} below safe_y_min = {:?} \
+                     — paint would jitter (Bug C regression)",
+                    deferred.y,
+                    safe_y_min,
+                );
+            });
+        });
     }
 }

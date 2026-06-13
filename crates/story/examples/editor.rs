@@ -20,6 +20,7 @@ use gpui_component::{
     },
     list::ListItem,
     resizable::{h_resizable, resizable_panel},
+    status_bar::StatusBar,
     tree::{TreeItem, TreeState, tree},
     v_flex,
 };
@@ -76,6 +77,8 @@ pub struct Example {
     soft_wrap: bool,
     show_whitespaces: bool,
     folding: bool,
+    scroll_beyond_last_line: Option<usize>,
+    cursor_surrounding_lines: Option<usize>,
     lsp_store: ExampleLspStore,
     _subscriptions: Vec<Subscription>,
     _lint_task: Task<()>,
@@ -726,7 +729,7 @@ impl Example {
         let tree_state = cx.new(|cx| TreeState::new(cx));
         Self::load_files(tree_state.clone(), PathBuf::from("./"), cx);
 
-        let _subscriptions = vec![cx.subscribe(&editor, |this, _, _: &InputEvent, cx| {
+        let _subscriptions = vec![cx.subscribe(&editor, |this, _editor, _: &InputEvent, cx| {
             this.lint_document(cx);
         })];
 
@@ -740,6 +743,8 @@ impl Example {
             soft_wrap: false,
             show_whitespaces: false,
             folding: true,
+            scroll_beyond_last_line: None,
+            cursor_surrounding_lines: None,
             lsp_store,
             _subscriptions,
             _lint_task: Task::ready(()),
@@ -968,7 +973,7 @@ impl Example {
         &self,
         _: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Button {
         Button::new("line-number")
             .when(self.line_number, |this| this.icon(IconName::Check))
             .label("Line Number")
@@ -983,7 +988,7 @@ impl Example {
             }))
     }
 
-    fn render_soft_wrap_button(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_soft_wrap_button(&self, _: &mut Window, cx: &mut Context<Self>) -> Button {
         Button::new("soft-wrap")
             .ghost()
             .xsmall()
@@ -1002,7 +1007,7 @@ impl Example {
         &self,
         _: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Button {
         Button::new("show-whitespace")
             .ghost()
             .xsmall()
@@ -1021,7 +1026,7 @@ impl Example {
         &self,
         _: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Button {
         Button::new("indent-guides")
             .ghost()
             .xsmall()
@@ -1036,7 +1041,7 @@ impl Example {
             }))
     }
 
-    fn render_folding_button(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_folding_button(&self, _: &mut Window, cx: &mut Context<Self>) -> Button {
         Button::new("folding")
             .ghost()
             .xsmall()
@@ -1051,7 +1056,66 @@ impl Example {
             }))
     }
 
-    fn render_go_to_line_button(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Cycle an `Option<usize>` row setting through a few demo values.
+    fn cycle_rows(v: Option<usize>) -> Option<usize> {
+        match v {
+            None => Some(0),
+            Some(0) => Some(3),
+            Some(3) => Some(8),
+            _ => None,
+        }
+    }
+
+    fn rows_label(v: Option<usize>) -> String {
+        match v {
+            None => "default".to_string(),
+            Some(n) => n.to_string(),
+        }
+    }
+
+    fn render_scroll_beyond_last_line_button(
+        &self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        Button::new("scroll-beyond-last-line")
+            .ghost()
+            .xsmall()
+            .label(format!(
+                "Scroll Beyond: {}",
+                Self::rows_label(self.scroll_beyond_last_line)
+            ))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.scroll_beyond_last_line = Self::cycle_rows(this.scroll_beyond_last_line);
+                this.editor.update(cx, |state, cx| {
+                    state.set_scroll_beyond_last_line(this.scroll_beyond_last_line, window, cx);
+                });
+                cx.notify();
+            }))
+    }
+
+    fn render_cursor_surrounding_lines_button(
+        &self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        Button::new("cursor-surrounding-lines")
+            .ghost()
+            .xsmall()
+            .label(format!(
+                "Cursor Surrounding: {}",
+                Self::rows_label(self.cursor_surrounding_lines)
+            ))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.cursor_surrounding_lines = Self::cycle_rows(this.cursor_surrounding_lines);
+                this.editor.update(cx, |state, cx| {
+                    state.set_cursor_surrounding_lines(this.cursor_surrounding_lines, window, cx);
+                });
+                cx.notify();
+            }))
+    }
+
+    fn render_go_to_line_button(&self, _: &mut Window, cx: &mut Context<Self>) -> Button {
         let position = self.editor.read(cx).cursor_position();
         let cursor = self.editor.read(cx).cursor();
 
@@ -1064,6 +1128,7 @@ impl Example {
                 position.character + 1,
                 cursor
             ))
+            .tooltip("Go to Line/Column")
             .on_click(cx.listener(Self::go_to_line))
     }
 }
@@ -1110,25 +1175,15 @@ impl Render for Example {
                             ),
                     )
                     .child(
-                        h_flex()
-                            .justify_between()
-                            .text_sm()
-                            .bg(cx.theme().background)
-                            .py_1p5()
-                            .px_4()
-                            .border_t_1()
-                            .border_color(cx.theme().border)
-                            .text_color(cx.theme().muted_foreground)
-                            .child(
-                                h_flex()
-                                    .gap_3()
-                                    .child(self.render_line_number_button(window, cx))
-                                    .child(self.render_soft_wrap_button(window, cx))
-                                    .child(self.render_show_whitespaces_button(window, cx))
-                                    .child(self.render_indent_guides_button(window, cx))
-                                    .child(self.render_folding_button(window, cx)),
-                            )
-                            .child(self.render_go_to_line_button(window, cx)),
+                        StatusBar::new()
+                            .left(self.render_line_number_button(window, cx))
+                            .left(self.render_soft_wrap_button(window, cx))
+                            .left(self.render_show_whitespaces_button(window, cx))
+                            .left(self.render_indent_guides_button(window, cx))
+                            .left(self.render_folding_button(window, cx))
+                            .left(self.render_scroll_beyond_last_line_button(window, cx))
+                            .left(self.render_cursor_surrounding_lines_button(window, cx))
+                            .right(self.render_go_to_line_button(window, cx)),
                     ),
             )
     }
